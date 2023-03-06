@@ -9,7 +9,7 @@ from vyper.codegen.function_definitions import generate_ir_for_function
 from vyper.codegen.global_context import GlobalContext
 from vyper.codegen.ir_node import IRnode
 from vyper.exceptions import CompilerPanic
-from vyper.semantics.types.function import StateMutability
+from vyper.semantics.types.function import StateMutability, ContractFunctionT, ContractFunctionTs
 
 
 def _topsort_helper(functions, lookup):
@@ -34,36 +34,20 @@ def _topsort(functions):
     return list(dict.fromkeys(_topsort_helper(functions, lookup)))
 
 
-def _is_init_func(func_ast):
-    return func_ast._metadata["signature"].is_init_func
-
-
-def _is_default_func(func_ast):
-    return func_ast._metadata["signature"].is_default_func
-
-
-def _is_internal(func_ast):
-    return func_ast._metadata["type"].is_internal
-
-
-def _is_payable(func_ast):
-    return func_ast._metadata["type"].mutability == StateMutability.PAYABLE
-
-
 # codegen for all runtime functions + callvalue/calldata checks + method selector routines
 def _runtime_ir(runtime_functions, all_sigs, global_ctx):
     # categorize the runtime functions because we will organize the runtime
     # code into the following sections:
     # payable functions, nonpayable functions, fallback function, internal_functions
-    internal_functions = [f for f in runtime_functions if _is_internal(f)]
+    internal_functions = [f for f in runtime_functions if f._metadata["signature"].is_internal]
 
-    external_functions = [f for f in runtime_functions if not _is_internal(f)]
-    default_function = next((f for f in external_functions if _is_default_func(f)), None)
+    external_functions = [f for f in runtime_functions if not f._metadata["signature"].is_internal]
+    default_function = next((f for f in external_functions if f._metadata["signature"].is_fallback), None)
 
     # functions that need to go exposed in the selector section
-    regular_functions = [f for f in external_functions if not _is_default_func(f)]
-    payables = [f for f in regular_functions if _is_payable(f)]
-    nonpayables = [f for f in regular_functions if not _is_payable(f)]
+    regular_functions = [f for f in external_functions if not f._metadata["signature"].is_fallback]
+    payables = [f for f in regular_functions if f._metadata["signature"].is_payable]
+    nonpayables = [f for f in regular_functions if not f._metadata["signature"].is_payable]
 
     # create a map of the IR functions since they might live in both
     # runtime and deploy code (if init function calls them)
@@ -83,7 +67,7 @@ def _runtime_ir(runtime_functions, all_sigs, global_ctx):
 
     # note: if the user does not provide one, the default fallback function
     # reverts anyway. so it does not hurt to batch the payable check.
-    default_is_nonpayable = default_function is None or not _is_payable(default_function)
+    default_is_nonpayable = default_function is None or not default_function._metadata["signature"].is_payable
 
     # when a contract has a nonpayable default function,
     # we can do a single check for all nonpayable functions
@@ -133,33 +117,33 @@ def _runtime_ir(runtime_functions, all_sigs, global_ctx):
 
 # take a GlobalContext, which is basically
 # and generate the runtime and deploy IR, also return the dict of all signatures
-def generate_ir_for_module(global_ctx: GlobalContext) -> Tuple[IRnode, IRnode, FunctionSignatures]:
+def generate_ir_for_module(global_ctx: GlobalContext) -> Tuple[IRnode, IRnode, ContractFunctionTs]:
     # order functions so that each function comes after all of its callees
     function_defs = _topsort(global_ctx.functions)
 
     # FunctionSignatures for all interfaces defined in this module
-    all_sigs: Dict[str, FunctionSignatures] = {}
+    all_funcs: Dict[str, ContractFunctionTs] = {}
 
     init_function: Optional[vy_ast.FunctionDef] = None
-    local_sigs: FunctionSignatures = {}  # internal/local functions
+    local_funcs: ContractFunctionTs = {}  # internal/local functions
 
     # generate all signatures
     # TODO really this should live in GlobalContext
     for f in function_defs:
-        sig = FunctionSignature.from_definition(f, global_ctx)
+        func_t = ContractFunctionT.from_FunctionDef(f)
         # add it to the global namespace.
-        local_sigs[sig.name] = sig
+        local_funcs[func_t.name] = func_t
         # a little hacky, eventually FunctionSignature should be
         # merged with ContractFunction and we can remove this.
-        f._metadata["signature"] = sig
+        f._metadata["signature"] = func_t
 
-    assert "self" not in all_sigs
-    all_sigs["self"] = local_sigs
+    assert "self" not in all_funcs
+    all_funcs["self"] = local_funcs
 
-    runtime_functions = [f for f in function_defs if not _is_init_func(f)]
-    init_function = next((f for f in function_defs if _is_init_func(f)), None)
+    runtime_functions = [f for f in function_defs if not f._metadata["signature"].is_constructor]
+    init_function = next((f for f in function_defs if f._metadata["signature"].is_constructor), None)
 
-    runtime, internal_functions = _runtime_ir(runtime_functions, all_sigs, global_ctx)
+    runtime, internal_functions = _runtime_ir(runtime_functions, all_funcs, global_ctx)
 
     deploy_code: List[Any] = ["seq"]
     immutables_len = global_ctx.immutable_section_bytes

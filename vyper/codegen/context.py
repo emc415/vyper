@@ -50,7 +50,7 @@ class Context:
         sigs=None,
         forvars=None,
         constancy=Constancy.Mutable,
-        sig=None,
+        func_t=None,
     ):
         # In-memory variables, in the form (name, memory location, type)
         self.vars = vars_ or {}
@@ -77,7 +77,7 @@ class Context:
         self.global_ctx = global_ctx
 
         # full function signature
-        self.sig = sig
+        self.func_t = func_t
         # Active scopes
         self._scopes = set()
 
@@ -246,13 +246,15 @@ class Context:
     def lookup_var(self, varname):
         return self.vars[varname]
 
+    # TODO delete
     def lookup_internal_function(self, method_name, args_ir, ast_source):
+        raise Exception("STOP")
         # TODO is this the right module for me?
         """
         Using a list of args, find the internal method to use, and
         the kwargs which need to be filled in by the compiler
         """
-
+        #TODO: change sig to a ContractFunctionT
         sig = self.sigs["self"].get(method_name, None)
 
         def _check(cond, s="Unreachable"):

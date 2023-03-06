@@ -71,6 +71,7 @@ class FunctionSignature:
 
     @cached_property
     def _ir_identifier(self) -> str:
+        #TODO: add internal to ctor for ContractFunctionT?
         # we could do a bit better than this but it just needs to be unique
         visibility = "internal" if self.internal else "external"
         argz = ",".join([str(arg.typ) for arg in self.args])
@@ -106,6 +107,7 @@ class FunctionSignature:
     def set_default_args(self):
         """Split base from kwargs and set member data structures"""
 
+        print(args)
         args = self.func_ast_code.args
 
         defaults = getattr(args, "defaults", [])
@@ -128,29 +130,8 @@ class FunctionSignature:
         is_from_json=False,
     ):
         name = func_ast.name
-
-        args = []
-        for arg in func_ast.args.args:
-            argname = arg.arg
-            argtyp = global_ctx.parse_type(arg.annotation)
-
-            args.append(FunctionArg(argname, argtyp, arg))
-
-        mutability = "nonpayable"  # Assume nonpayable by default
         nonreentrant_key = None
         is_internal = None
-
-        # Update function properties from decorators
-        # NOTE: Can't import enums here because of circular import
-        for dec in func_ast.decorator_list:
-            if isinstance(dec, vy_ast.Name) and dec.id in ("payable", "view", "pure"):
-                mutability = dec.id
-            elif isinstance(dec, vy_ast.Name) and dec.id == "internal":
-                is_internal = True
-            elif isinstance(dec, vy_ast.Name) and dec.id == "external":
-                is_internal = False
-            elif isinstance(dec, vy_ast.Call) and dec.func.id == "nonreentrant":
-                nonreentrant_key = dec.args[0].s
 
         if constant_override:
             # In case this override is abused, match previous behavior

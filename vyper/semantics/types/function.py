@@ -2,6 +2,7 @@ import re
 import warnings
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
 
 from vyper import ast as vy_ast
 from vyper.ast.validation import validate_call_args
@@ -29,7 +30,18 @@ from vyper.semantics.types.shortcuts import UINT256_T
 from vyper.semantics.types.subscriptable import TupleT
 from vyper.semantics.types.utils import type_from_abi, type_from_annotation
 from vyper.utils import keccak256
+from functools import cached_property
 
+ContractFunctionTs = Dict[str, "ContractFunctionT"]
+
+@dataclass
+class PositionalArg:
+    name: str
+    typ: VyperType
+
+@dataclass
+class KeywordArg(PositionalArg):
+    default_value: vy_ast.VyperNode
 
 class ContractFunctionT(VyperType):
     """
@@ -65,10 +77,8 @@ class ContractFunctionT(VyperType):
     def __init__(
         self,
         name: str,
-        arguments: OrderedDict,
-        # TODO rename to something like positional_args, keyword_args
-        min_arg_count: int,
-        max_arg_count: int,
+        positional_args: List[PositionalArg],
+        keyword_args: List[KeywordArg],
         return_type: Optional[VyperType],
         function_visibility: FunctionVisibility,
         state_mutability: StateMutability,
@@ -77,16 +87,17 @@ class ContractFunctionT(VyperType):
         super().__init__()
 
         self.name = name
-        self.arguments = arguments
-        self.min_arg_count = min_arg_count
-        self.max_arg_count = max_arg_count
+        self.positional_args = positional_args
+        self.keyword_args = keyword_args
         self.return_type = return_type
-        self.kwarg_keys = []
-        if min_arg_count < max_arg_count:
-            self.kwarg_keys = list(self.arguments)[min_arg_count:]
+        # self.kwarg_keys = []
+        # if min_arg_count < max_arg_count:
+        #     self.kwarg_keys = list(self.arguments)[min_arg_count:]
         self.visibility = function_visibility
         self.mutability = state_mutability
         self.nonreentrant = nonreentrant
+
+        self.set_default_args()
 
         # a list of internal functions this function calls
         self.called_functions: Set["ContractFunctionT"] = set()
@@ -146,7 +157,7 @@ class ContractFunctionT(VyperType):
 
     @classmethod
     def from_FunctionDef(
-        cls, node: vy_ast.FunctionDef, is_interface: Optional[bool] = False
+            cls, node: vy_ast.FunctionDef, is_interface: Optional[bool] = False
     ) -> "ContractFunctionT":
         """
         Generate a `ContractFunctionT` object from a `FunctionDef` node.
@@ -373,6 +384,61 @@ class ContractFunctionT(VyperType):
             state_mutability=StateMutability.VIEW,
         )
 
+    @cached_property
+    def _ir_identifier(self) -> str:
+        # we could do a bit better than this but it just needs to be unique
+        visibility = "internal" if self.is_internal else "external"
+        argz = ",".join([str(arg.typ) for arg in self.arguments])
+        ret = f"{visibility} {self.name} ({argz})"
+        return mkalphanum(ret)
+
+    #TODO the following two funcs just copy and pasted from FunctionSignature
+    # calculate the abi signature for a given set of kwargs
+    def abi_signature_for_kwargs(self, kwargs):
+        args = self.base_args + kwargs
+        return self.name + "(" + ",".join([arg.typ.abi_type.selector_name() for arg in args]) + ")"
+
+    @cached_property
+    def base_signature(self):
+        return self.abi_signature_for_kwargs([])
+
+    @property
+    def internal_function_label(self):
+        assert self.is_internal, "why are you doing this"
+
+        return self._ir_identifier
+
+    @property
+    # common entry point for external function with kwargs
+    def external_function_base_entry_label(self):
+        assert not self.is_internal
+
+        return self._ir_identifier + "_common"
+
+    @property
+    def exit_sequence_label(self):
+        return self._ir_identifier + "_cleanup"
+
+    # TODO Delete
+    def _set_default_args(self):
+        """Split base from kwargs and set member data structures"""
+
+        args = self.arguments
+        print(args)
+        defaults = getattr(args, "defaults", [])
+#        num_base_args = len(args.args) - len(defaults)
+
+        default_args_length = self.max_arg_count - self.min_arg_count
+        #make sure this is equivalent (i think it is)
+        self.base_args = self.kwarg_keys
+        #double check this slice is correct or is it [default_args_length:]
+        #looking for the slice n til the end
+        self.default_args = list(args)[:default_args_length]
+
+        # Keep all the value to assign to default parameters.
+        self.default_values = dict(zip([arg.name for arg in self.default_args], defaults))
+
+
     @property
     # convenience property for compare_signature, as it would
     # appear in a public interface
@@ -410,6 +476,10 @@ class ContractFunctionT(VyperType):
     @property
     def is_internal(self) -> bool:
         return self.visibility == FunctionVisibility.INTERNAL
+
+    @property
+    def is_payable(self) -> bool:
+        return self.mutability == StateMutability.PAYABLE
 
     @property
     def method_ids(self) -> Dict[str, int]:
@@ -546,6 +616,9 @@ class ContractFunctionT(VyperType):
         else:
             return [abi_dict]
 
+    @cached_property
+    def is_modifying(self):
+        return self.mutability not in (StateMutability.VIEW, StateMutability.PURE)
 
 class MemberFunctionT(VyperType):
     """

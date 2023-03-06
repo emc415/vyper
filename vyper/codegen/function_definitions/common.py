@@ -1,5 +1,6 @@
 # can't use from [module] import [object] because it breaks mocks in testing
 from typing import Dict
+from dataclasses import dataclass
 
 import vyper.ast as vy_ast
 from vyper.ast.signatures import FrameInfo, FunctionSignature
@@ -11,7 +12,11 @@ from vyper.codegen.global_context import GlobalContext
 from vyper.codegen.ir_node import IRnode
 from vyper.codegen.memory_allocator import MemoryAllocator
 from vyper.utils import MemoryPositions, calc_mem_gas
+from vyper.semantics.types.function import StateMutability, ContractFunctionT
 
+
+# @dataclass
+# class FunctionIRInfo:
 
 def generate_ir_for_function(
     code: vy_ast.FunctionDef,
@@ -26,12 +31,12 @@ def generate_ir_for_function(
         - Clamping and copying of arguments
         - Function body
     """
-    sig = code._metadata["signature"]
+    func_t = code._metadata["type"]
 
     # Validate return statements.
     check_single_exit(code)
 
-    callees = code._metadata["type"].called_functions
+    callees = func_t.called_functions
 
     # we start our function frame from the largest callee frame
     max_callee_frame_size = 0
@@ -49,31 +54,31 @@ def generate_ir_for_function(
         global_ctx=global_ctx,
         sigs=sigs,
         memory_allocator=memory_allocator,
-        constancy=Constancy.Constant if sig.mutability in ("view", "pure") else Constancy.Mutable,
-        sig=sig,
+        constancy=Constancy.Mutable if func_t.is_modifying else Constancy.Constant,
+        func_t=func_t,
     )
 
-    if sig.internal:
+    if func_t.is_internal:
         assert skip_nonpayable_check is False
-        o = generate_ir_for_internal_function(code, sig, context)
+        o = generate_ir_for_internal_function(code, func_t, context)
     else:
-        if sig.mutability == "payable":
+        if func_t.mutability == StateMutability.PAYABLE:
             assert skip_nonpayable_check is False  # nonsense
-        o = generate_ir_for_external_function(code, sig, context, skip_nonpayable_check)
+        o = generate_ir_for_external_function(code, func_t, context, skip_nonpayable_check)
 
     o.source_pos = getpos(code)
 
     frame_size = context.memory_allocator.size_of_mem - MemoryPositions.RESERVED_MEMORY
 
-    sig.set_frame_info(FrameInfo(allocate_start, frame_size, context.vars))
+    func_t.set_frame_info(FrameInfo(allocate_start, frame_size, context.vars))
 
-    if not sig.internal:
+    if not func_t.is_internal:
         # adjust gas estimate to include cost of mem expansion
         # frame_size of external function includes all private functions called
         # (note: internal functions do not need to adjust gas estimate since
         # it is already accounted for by the caller.)
-        o.add_gas_estimate += calc_mem_gas(sig.frame_info.mem_used)
+        o.add_gas_estimate += calc_mem_gas(func_t.frame_info.mem_used)
 
-    sig.gas_estimate = o.gas
+    func_t.gas_estimate = o.gas
 
     return o
